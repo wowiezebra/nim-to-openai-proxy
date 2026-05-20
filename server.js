@@ -4,12 +4,14 @@
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
+const { StringDecoder } = require('string_decoder');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
+
 app.use((req, res, next) => {
   if (req.path === '/health' || req.path === '/v1/models') {
     return next();
@@ -72,7 +74,8 @@ const FALLBACK_MODELS = [
   'google/gemma-4-31b-it'
 ];
 
-// You can delete this part from your fork if you don't trust it since it calls on a discord webhook. The webhook is an env variable, and is just used to check if the models are valid.
+// You can delete this part from your fork if you don't trust it since it calls on a discord webhook.
+// The webhook is an env variable, and is just used to check if the models are valid.
 
 const SKIP_VALIDATION = process.env.SKIP_VALIDATION === 'true';
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
@@ -81,7 +84,7 @@ const SKIP_VALIDATION_MODELS = ['deepseek-ai/deepseek-v4-pro'];
 
 async function sendDiscordAlert(invalidModels) {
   if (!DISCORD_WEBHOOK_URL) return;
-  
+
   const embed = {
     title: '⚠️ NIM Proxy: Model Validation Failed',
     description: `${invalidModels.length} model(s) failed validation. Check NIM catalog for deprecations.`,
@@ -99,6 +102,7 @@ async function sendDiscordAlert(invalidModels) {
       embeds: [embed],
       username: 'NIM Proxy Monitor'
     });
+
     console.log('[DISCORD] Alert sent.');
   } catch (err) {
     console.error('[DISCORD] Failed to send alert:', err.message);
@@ -139,11 +143,16 @@ async function validateModels() {
             timeout: 60000
           }
         );
+
         console.log(`[VALIDATION] ✓ ${alias} → ${nimId}`);
         succeeded = true;
         break;
+
       } catch (err) {
-        const isTimeout = err.code === 'ECONNABORTED' || err.message?.includes('timeout');
+        const isTimeout =
+          err.code === 'ECONNABORTED' ||
+          err.message?.includes('timeout');
+
         const isLastAttempt = attempt === 2;
 
         if (isTimeout && !isLastAttempt) {
@@ -153,9 +162,18 @@ async function validateModels() {
 
         if (isLastAttempt) {
           const status = err.response?.status;
-          const msg = err.response?.data?.error?.message || err.message;
-          console.error(`[VALIDATION] ✗ ${alias} → ${nimId} | ${status} ${msg}`);
-          invalid.push({ alias, nimId, error: `${status} ${msg}` });
+          const msg =
+            err.response?.data?.error?.message || err.message;
+
+          console.error(
+            `[VALIDATION] ✗ ${alias} → ${nimId} | ${status} ${msg}`
+          );
+
+          invalid.push({
+            alias,
+            nimId,
+            error: `${status} ${msg}`
+          });
         }
       }
     }
@@ -163,8 +181,13 @@ async function validateModels() {
 
   if (invalid.length > 0) {
     console.warn(`[VALIDATION] ${invalid.length} model(s) failed:`);
-    for (const m of invalid) console.warn(`  - ${m.alias}: ${m.error}`);
+
+    for (const m of invalid) {
+      console.warn(`  - ${m.alias}: ${m.error}`);
+    }
+
     await sendDiscordAlert(invalid);
+
   } else {
     console.log('[VALIDATION] All models valid.');
   }
@@ -207,11 +230,18 @@ async function callWithFallback(baseRequest, models) {
           timeout: 180000
         }
       );
+
       return { response: res, model };
+
     } catch (err) {
-      console.warn(`[FALLBACK] Model failed: ${model}`, err.response?.status, err.response?.data?.error?.message || err.message);
+      console.warn(
+        `[FALLBACK] Model failed: ${model}`,
+        err.response?.status,
+        err.response?.data?.error?.message || err.message
+      );
     }
   }
+
   throw new Error('All models failed');
 }
 
@@ -219,31 +249,56 @@ app.post('/v1/chat/completions', async (req, res) => {
   let streamEndedCleanly = false;
 
   try {
-    const { model, messages, temperature, max_tokens, stream } = req.body;
+    const {
+      model,
+      messages,
+      temperature,
+      max_tokens,
+      stream
+    } = req.body;
 
-    const primaryModel = MODEL_MAPPING[model] || 'nvidia/llama-3.3-nemotron-super-49b-v1.5';
-    const modelChain = [primaryModel, ...FALLBACK_MODELS];
+    const primaryModel =
+      MODEL_MAPPING[model] ||
+      'nvidia/llama-3.3-nemotron-super-49b-v1.5';
+
+    const modelChain = [
+      primaryModel,
+      ...FALLBACK_MODELS
+    ];
 
     const baseRequest = {
       messages,
       temperature: temperature ?? 0.7,
-      max_tokens: Math.min(max_tokens ?? 2048, MAX_TOKENS_LIMIT),
+      max_tokens: Math.min(
+        max_tokens ?? 2048,
+        MAX_TOKENS_LIMIT
+      ),
       stream: stream || false,
       extra_body: ENABLE_THINKING_MODE
-        ? { chat_template_kwargs: { thinking: true } }
+        ? {
+            chat_template_kwargs: {
+              thinking: true
+            }
+          }
         : undefined
     };
 
-    const { response, model: usedModel } = await callWithFallback(baseRequest, modelChain);
-    console.log("[PROXY] Model used:", usedModel);
+    const {
+      response,
+      model: usedModel
+    } = await callWithFallback(baseRequest, modelChain);
+
+    console.log('[PROXY] Model used:', usedModel);
 
     if (stream) {
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
 
-      // FIX: Buffer raw bytes instead of strings to prevent UTF-8 corruption across chunk boundaries
-      let buffer = Buffer.alloc(0);
+      // FIX: Proper UTF-8-safe decoding without corrupting split multibyte chars
+      const decoder = new StringDecoder('utf8');
+
+      let buffer = '';
       let reasoningOpen = false;
       let doneSent = false;
 
@@ -255,6 +310,7 @@ app.post('/v1/chat/completions', async (req, res) => {
             res.write('data: [DONE]\n\n');
             doneSent = true;
           }
+
           streamEndedCleanly = true;
           return;
         }
@@ -269,9 +325,9 @@ app.post('/v1/chat/completions', async (req, res) => {
 
             if (SHOW_REASONING) {
               if (reasoning && !reasoningOpen) {
-                // FIX: Escape newlines in reasoning to prevent SSE line-break corruption
                 content = `<thinking>\n${reasoning.replace(/\n/g, '\\n')}`;
                 reasoningOpen = true;
+
               } else if (reasoning) {
                 content = reasoning.replace(/\n/g, '\\n');
               }
@@ -287,21 +343,23 @@ app.post('/v1/chat/completions', async (req, res) => {
           }
 
           res.write(`data: ${JSON.stringify(data)}\n\n`);
+
         } catch (parseErr) {
-          console.warn('[STREAM] Skipped invalid JSON line:', line.slice(0, 100));
+          console.warn(
+            '[STREAM] Skipped invalid JSON line:',
+            line.slice(0, 100)
+          );
         }
       };
 
       response.data.on('data', chunk => {
-        // FIX: Concatenate raw buffers, then decode to string to preserve multi-byte UTF-8 chars
-        buffer = Buffer.concat([buffer, chunk]);
-        const str = buffer.toString('utf8');
-        const lines = str.split('\n');
-        
-        // Keep incomplete UTF-8 bytes for next chunk
-        const lastLine = lines.pop() || '';
-        const lastLineBytes = Buffer.from(lastLine, 'utf8');
-        buffer = Buffer.concat([lastLineBytes]);
+        // Proper UTF-8-safe decoding
+        buffer += decoder.write(chunk);
+
+        const lines = buffer.split('\n');
+
+        // Keep incomplete line for next chunk
+        buffer = lines.pop() || '';
 
         for (const line of lines) {
           processLine(line);
@@ -309,14 +367,18 @@ app.post('/v1/chat/completions', async (req, res) => {
       });
 
       response.data.on('end', () => {
-        // Process any remaining complete lines in buffer
-        if (buffer.length > 0) {
-          const str = buffer.toString('utf8').trim();
-          if (str) {
-            console.warn('[STREAM] Processing leftover buffer at end:', str.slice(0, 100));
-            for (const line of str.split('\n')) {
-              processLine(line);
-            }
+        // Flush remaining UTF-8 decoder bytes
+        buffer += decoder.end();
+
+        // Process any leftover lines
+        if (buffer.trim()) {
+          console.warn(
+            '[STREAM] Processing leftover buffer at end:',
+            buffer.slice(0, 100)
+          );
+
+          for (const line of buffer.split('\n')) {
+            processLine(line);
           }
         }
 
@@ -330,8 +392,17 @@ app.post('/v1/chat/completions', async (req, res) => {
 
       response.data.on('error', err => {
         console.error('[STREAM] Upstream error:', err.message);
+
         if (!res.writableEnded) {
-          res.write(`data: ${JSON.stringify({ error: { message: 'Stream interrupted', type: 'stream_error' } })}\n\n`);
+          res.write(
+            `data: ${JSON.stringify({
+              error: {
+                message: 'Stream interrupted',
+                type: 'stream_error'
+              }
+            })}\n\n`
+          );
+
           res.write('data: [DONE]\n\n');
           res.end();
         }
@@ -341,6 +412,7 @@ app.post('/v1/chat/completions', async (req, res) => {
         if (!streamEndedCleanly) {
           console.warn('[STREAM] Client disconnected prematurely');
         }
+
         if (response.data && !response.data.destroyed) {
           response.data.destroy();
         }
@@ -352,13 +424,19 @@ app.post('/v1/chat/completions', async (req, res) => {
         object: 'chat.completion',
         created: Math.floor(Date.now() / 1000),
         model: model,
+
         choices: (response.data.choices || []).map((choice, i) => {
           let content = choice.message?.content || '';
 
-          if (SHOW_REASONING && choice.message?.reasoning_content) {
-            // FIX: Escape newlines in non-stream reasoning too
-            const safeReasoning = choice.message.reasoning_content.replace(/\n/g, '\\n');
-            content = `<thinking>\n${safeReasoning}\n</thinking>\n\n${content}`;
+          if (
+            SHOW_REASONING &&
+            choice.message?.reasoning_content
+          ) {
+            const safeReasoning =
+              choice.message.reasoning_content.replace(/\n/g, '\\n');
+
+            content =
+              `<thinking>\n${safeReasoning}\n</thinking>\n\n${content}`;
           }
 
           return {
@@ -371,6 +449,7 @@ app.post('/v1/chat/completions', async (req, res) => {
             finish_reason: choice.finish_reason || 'stop'
           };
         }),
+
         usage: response.data.usage || {
           prompt_tokens: 0,
           completion_tokens: 0,
@@ -393,8 +472,17 @@ app.post('/v1/chat/completions', async (req, res) => {
           code: error.response?.status || 500
         }
       });
+
     } else if (!res.writableEnded) {
-      res.write(`data: ${JSON.stringify({ error: { message: error.message, type: 'proxy_error' } })}\n\n`);
+      res.write(
+        `data: ${JSON.stringify({
+          error: {
+            message: error.message,
+            type: 'proxy_error'
+          }
+        })}\n\n`
+      );
+
       res.write('data: [DONE]\n\n');
       res.end();
     }
